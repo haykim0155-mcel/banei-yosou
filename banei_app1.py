@@ -24,15 +24,15 @@ def get_pre_path(date_str):
 # =========================================================
 def get_moisture_key(val):
     if val <= 0.9:
-        return "~0.9"
+        return "極重"
     elif val <= 1.5:
-        return "~1.5"
+        return "稍重"
     elif val <= 2.0:
-        return "~2"
+        return "普通"
     elif val <= 3.0:
-        return "~3"
+        return "稍軽"
     else:
-        return "3.1~"
+        return "極軽"
 
 # =========================================================
 # 💡 騎手・調教師の表記ゆれ（5文字名・ケ/ヶ・空白等）を完全抽出するマスタ参照関数
@@ -262,16 +262,19 @@ def show_screen1():
     st.header("事前予想モード")
 
     try:
-        with open("master_data.json", "r", encoding="utf-8") as f:
-            master_data = json.load(f)
-        with open("master_analysis.json", "r", encoding="utf-8") as f:
-            master_analysis = json.load(f)
+        with open("master_jt.json", "r", encoding="utf-8") as f:
+            master_jt = json.load(f)
+        with open("master_abil.json", "r", encoding="utf-8") as f:
+            master_abil = json.load(f)
+        with open("master_cond.json", "r", encoding="utf-8") as f:
+            master_cond = json.load(f)
 
-        # master 変数に master_analysis.json と master_data.json の情報を完全統合
-        master = master_analysis.copy() if isinstance(master_analysis, dict) else {}
-        if isinstance(master_data, dict):
-            master["jockey"] = master_data.get("jockey", {})
-            master["trainer"] = master_data.get("trainer", {})
+        # アプリ内参照用辞書（master）へ統合
+        master = master_cond.copy() if isinstance(master_cond, dict) else {}
+        master["能力5指標"] = master_abil if isinstance(master_abil, dict) else {}
+        if isinstance(master_jt, dict):
+            master["jockey"] = master_jt.get("jockey", {})
+            master["trainer"] = master_jt.get("trainer", {})
     except Exception as e:
         st.error(f"マスタファイルの読み込みエラー: {e}")
         return
@@ -357,17 +360,16 @@ def show_screen1():
                     saved_json = json.load(pf)
                 loaded_dict = {}
                 for r in range(1, 13):
-                    r_str_key = f"{r}R"
-                    if r_str_key in saved_json:
-                        loaded_dict[r] = saved_json[r_str_key]
-                    elif str(r) in saved_json:
-                        loaded_dict[r] = saved_json[str(r)]
-                    elif r in saved_json:
-                        loaded_dict[r] = saved_json[r]
-                    else:
-                        loaded_dict[r] = []
+                    # "1R", "1", 1 のどのキー構造でも確実に整数 1~12 で取得
+                    r_data = (
+                        saved_json.get(f"{r}R")
+                        or saved_json.get(str(r))
+                        or saved_json.get(r)
+                        or []
+                    )
+                    loaded_dict[r] = r_data
                 st.session_state.fetched_data = loaded_dict
-                st.success(f"『pre_data_{date_clean}.json』 を正常に読み込みました！")
+                st.success(f"『pre_data_{date_clean}.json』 を正常に読み込みました！（全12Rの補正値を復元）")
             except Exception as e:
                 st.error(f"保存データの読み込みエラー: {e}")
         elif "fetched_data" not in st.session_state:
@@ -392,12 +394,20 @@ def show_screen1():
             with col_input:
                 st.markdown("**補正入力**")
                 
-                # 💡 保存済み・ロード済みのデータを確実に10頭分抽出
+                # 💡 ロードされたデータから 1~10番馬の補正値を型(int/str)問わず100%抽出
                 kinsou_init = []
                 class_init = []
                 
                 r_list = st.session_state.fetched_data.get(r_idx, [])
-                r_map = {int(x["馬番"]): x for x in r_list if isinstance(x, dict) and "馬番" in x}
+                # 馬番キーの型ゆれ（文字列 "1" や 数値 1）を吸収してマップ作成
+                r_map = {}
+                if isinstance(r_list, list):
+                    for x in r_list:
+                        if isinstance(x, dict) and "馬番" in x:
+                            try:
+                                r_map[int(float(x["馬番"]))] = x
+                            except Exception:
+                                pass
                 
                 for h in range(1, 11):
                     h_info = r_map.get(h, {})
@@ -420,7 +430,7 @@ def show_screen1():
                     }
                 )
                 
-                # 💡 1つ目の st.data_editor（ここだけに絞り込む）
+                # 💡 日付とレース番号を組み合わせて一意のキーを発行し、過去データ読み込み時の復元漏れを防止
                 edited_inputs = st.data_editor(
                     input_df,
                     column_config={
@@ -443,11 +453,11 @@ def show_screen1():
                     disabled=["馬番"],
                     hide_index=True,
                     height=390,
-                    key=f"editor_input_single_r_{r_idx}",
+                    key=f"editor_input_r_{r_idx}_{st.session_state.get('current_pre_date', date_clean)}",
                     use_container_width=True,
                 )
 
-                # 💡 編集内容を即時反映（2R以降のデータ保持）
+                # 💡 手入力・ロードされた補正値をセッション状態の全データ側へ即時反映
                 for _, ed_row in edited_inputs.iterrows():
                     h_num = int(ed_row["馬番"])
                     if h_num in r_map:
@@ -468,13 +478,14 @@ def show_screen1():
                 # ---------------------------------------------------------
                 # 1. 脚質複勝率の取得（JSON構造: [half_key]["脚質"][s_name][moisture_key]["複勝率"]）
                 # ---------------------------------------------------------
+                # 💡 マスタの正則構造: [前半/後半] ➔ [水分区分] ➔ [脚質] ➔ [脚質名] に合わせてキーの順番を修正
                 raw_p_kyakushitsu = 0.25
                 try:
                     style_node = (
                         master.get(half_key, {})
+                        .get(moisture_key, {})
                         .get("脚質", {})
                         .get(s_name, {})
-                        .get(moisture_key, {})
                     )
                     if isinstance(style_node, dict):
                         raw_p_kyakushitsu = float(

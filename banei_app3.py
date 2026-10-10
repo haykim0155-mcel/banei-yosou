@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import glob
 from datetime import datetime
 import pandas as pd
 import pypdf
@@ -12,9 +13,10 @@ import streamlit as st
 DIR_PRE = "data/pre"
 DIR_TODAY = "data/today"
 DIR_RESULT = "data/result"
-PATH_RAW = "master_raw.json"
-PATH_DATA = "master_data.json"
-PATH_ANALYSIS = "master_analysis.json"
+
+PATH_JT = "master_jt.json"
+PATH_ABIL = "master_abil.json"
+PATH_COND = "master_cond.json"
 PATH_HIST_BALANCE = "history_balance.json"
 PATH_HIST_WINRATES = "history_winrates.json"
 
@@ -49,7 +51,7 @@ def get_result_path(date_str):
     return os.path.join(DIR_RESULT, f"result_data_{date_str}.json")
 
 # =========================================================
-# 水分量からマスタ参照キーを取得する関数 (~0.9, ~1.5, ~2, ~3, 3.1~)
+# 水分量からマスタ参照キーを取得する関数（新日本語表記統一）
 # =========================================================
 def get_moisture_key(val):
     try:
@@ -58,15 +60,15 @@ def get_moisture_key(val):
         f_val = 1.0
 
     if f_val <= 0.9:
-        return "~0.9"
+        return "極重"
     elif f_val <= 1.5:
-        return "~1.5"
+        return "稍重"
     elif f_val <= 2.0:
-        return "~2"
+        return "普通"
     elif f_val <= 3.0:
-        return "~3"
+        return "稍軽"
     else:
-        return "3.1~"
+        return "極軽"
 
 
 # =========================================================
@@ -88,7 +90,7 @@ def get_weight_key(val):
         return "±1桁"
 
 # =========================================================
-# 💡 全データ一括自動更新エンジン（関数名を完全統一）
+# 💡 全データ一括自動更新エンジン（最終総合順位4頭BOX厳密計算＆JSON綺麗整形版）
 # =========================================================
 def update_all_data_from_results(target_date, moisture_str="1.0%"):
     clean_d = re.sub(r"\D", "", target_date)
@@ -106,9 +108,10 @@ def update_all_data_from_results(target_date, moisture_str="1.0%"):
     pre_json = load_json(pre_path)
     today_json = load_json(today_path)
 
-    raw_data = load_json(PATH_RAW)
-    master_data = load_json(PATH_DATA)
-    master_analysis = load_json(PATH_ANALYSIS)
+    # 新3分割JSONの読み込み
+    master_jt = load_json(PATH_JT)
+    master_abil = load_json(PATH_ABIL)
+    master_cond = load_json(PATH_COND)
 
     d_label = (
         f"{int(clean_d[4:6])}月{int(clean_d[6:])}日"
@@ -118,51 +121,72 @@ def update_all_data_from_results(target_date, moisture_str="1.0%"):
 
     day_payouts = {
         "日付": d_label,
-        "単勝": 0,
-        "複勝": 0,
-        "枠連": 0,
-        "馬連": 0,
-        "馬単": 0,
-        "ワイド": 0,
-        "3連複": 0,
-        "3連単": 0,
+        "単勝": 0, "複勝": 0, "馬連": 0, "馬単": 0, "ワイド": 0, "3連複": 0, "3連単": 0,
     }
 
     day_winrates = {"日付": d_label, "水分": moisture_str}
 
-    # 事前データの馬番紐付けマップ作成
+    # 事前データ ＆ 当日確定データの統合マッピング作成
     pre_map = {}
+    
+    # 1. まず pre_data から基本情報（騎手・能力など）を取得
     if isinstance(pre_json, dict):
         for r_k, h_list in pre_json.items():
-            pre_map[r_k] = {
-                int(h["馬番"]): {
-                    "騎手": h.get("騎手", ""),
-                    "調教師": h.get("調教師", ""),
-                    "脚質": h.get("脚質", "先行"),
-                    "オッズ記号": h.get("オッズ記号", "△"),
-                    "馬体重差": h.get("馬体重差", "±1桁"),
-                }
-                for h in h_list
-                if "馬番" in h and str(h["馬番"]).isdigit()
-            }
+            pre_map[r_k] = {}
+            if isinstance(h_list, list):
+                for h in h_list:
+                    if isinstance(h, dict) and "馬番" in h:
+                        try:
+                            h_no = int(float(h["馬番"]))
+                            pre_map[r_k][h_no] = {
+                                "騎手": str(h.get("騎手", "")).strip(),
+                                "調教師": str(h.get("調教師", "")).strip(),
+                                "脚質": str(h.get("脚質", "先行")).strip(),
+                                "オッズ記号": str(h.get("オッズ記号", h.get("オッズ", "×"))).strip(),
+                                "馬体重差": get_weight_key(h.get("増減", h.get("馬体重差", 0))),
+                                "先行力": int(float(h.get("先行力", h.get("先行", 3)))),
+                                "障害力": int(float(h.get("障害力", h.get("障害", 3)))),
+                                "末脚力": int(float(h.get("末脚力", h.get("末脚", 3)))),
+                                "軽馬場": int(float(h.get("軽馬場", 3))),
+                                "重馬場": int(float(h.get("重馬場", 3))),
+                            }
+                        except Exception: pass
 
-    # 水分量区分の特定 (例: "2.9%" -> "~3")
+    # 2. 💡【重要】today_data に入っている「当日の確定オッズ記号・馬体重増減」で上書き補正
+    if isinstance(today_json, dict):
+        for r_k, h_list in today_json.items():
+            if r_k not in pre_map:
+                pre_map[r_k] = {}
+            if isinstance(h_list, list):
+                for h in h_list:
+                    if isinstance(h, dict) and "馬番" in h:
+                        try:
+                            h_no = int(float(h["馬番"]))
+                            if h_no not in pre_map[r_k]:
+                                pre_map[r_k][h_no] = {
+                                    "騎手": str(h.get("騎手", "")).strip(),
+                                    "調教師": str(h.get("調教師", "")).strip(),
+                                    "脚質": str(h.get("脚質", "先行")).strip(),
+                                    "先行力": 3, "障害力": 3, "末脚力": 3, "軽馬場": 3, "重馬場": 3
+                                }
+                            
+                            # 当日のオッズ記号と馬体重差を確実にセット
+                            o_raw = str(h.get("オッズ記号", h.get("オッズマーク", h.get("オッズ印", h.get("オッズ", "-"))))).strip()
+                            w_raw = h.get("増減", h.get("馬体重増減", h.get("馬体重差", 0)))
+                            
+                            if o_raw in ["◎", "○", "▲", "△", "×"]:
+                                pre_map[r_k][h_no]["オッズ記号"] = o_raw
+                            pre_map[r_k][h_no]["馬体重差"] = get_weight_key(w_raw)
+                            if "脚質" in h and h["脚質"]:
+                                pre_map[r_k][h_no]["脚質"] = str(h["脚質"]).strip()
+                        except Exception: pass
+
     try:
         m_val = float(re.sub(r"[^\d.]", "", moisture_str))
-        if m_val <= 0.9:
-            w_seg = "~0.9"
-        elif m_val <= 1.5:
-            w_seg = "~1.5"
-        elif m_val <= 2.0:
-            w_seg = "~2"
-        elif m_val <= 3.0:
-            w_seg = "~3"
-        else:
-            w_seg = "3.1~"
+        w_seg = get_moisture_key(m_val)
     except Exception:
-        w_seg = "~1.5"
+        w_seg = "稍重"
 
-    # 12R分の結果から全マスタ加算・更新
     for r in range(1, 13):
         r_k = f"{r}R"
         r_info = res_json.get(r_k, {})
@@ -170,103 +194,9 @@ def update_all_data_from_results(target_date, moisture_str="1.0%"):
         t2_list = r_info.get("2着_list", [])
         t3_list = r_info.get("3着_list", [])
 
-        # 収支加算（全8券種）
-        for m_str, p_val in r_info.get("単勝_dict", {}).items():
-            day_payouts["単勝"] += p_val
-        for item in r_info.get("複勝_list", []):
-            day_payouts["複勝"] += item.get("金額", 0)
-        for p_val in r_info.get("枠連_dict", {}).values():
-            day_payouts["枠連"] += p_val
-        for p_val in r_info.get("馬連_dict", {}).values():
-            day_payouts["馬連"] += p_val
-        for p_val in r_info.get("馬単_dict", {}).values():
-            day_payouts["馬単"] += p_val
-        for item in r_info.get("ワイド_list", []):
-            day_payouts["ワイド"] += item.get("金額", 0)
-        for p_val in r_info.get("3連複_dict", {}).values():
-            day_payouts["3連複"] += p_val
-        for p_val in r_info.get("3連単_dict", {}).values():
-            day_payouts["3連単"] += p_val
-
-        # 出走馬ごとの実績加算
-        r_pre = pre_map.get(r_k, {})
-        sec_key = "前半(1~6R)" if r <= 6 else "後半(7~12R)"
-
-        for h_num, h_info in r_pre.items():
-            j_name = h_info["騎手"]
-            t_name = h_info["調教師"]
-            s_val = h_info["脚質"]
-            o_val = h_info["オッズ記号"]
-            w_val = h_info["馬体重差"]
-
-            rank = 4
-            if h_num in t1_list:
-                rank = 1
-            elif h_num in t2_list:
-                rank = 2
-            elif h_num in t3_list:
-                rank = 3
-
-            # 1. 騎手・調教師マスタ (master_raw.json) 更新
-            for entity_type, name in [("jockey", j_name), ("trainer", t_name)]:
-                if not name or name not in raw_data.get(entity_type, {}):
-                    continue
-                stats = raw_data[entity_type][name]
-                if not isinstance(stats, dict):
-                    continue
-
-                stats["総数"] = stats.get("総数", 0) + 1
-                if rank == 1:
-                    stats["1着"] = stats.get("1着", 0) + 1
-                    stats["通算勝数"] = stats.get("通算勝数", 0) + 1
-                elif rank == 2:
-                    stats["2着"] = stats.get("2着", 0) + 1
-                elif rank == 3:
-                    stats["3着"] = stats.get("3着", 0) + 1
-                else:
-                    stats["4着以下"] = stats.get("4着以下", 0) + 1
-
-                tot = stats["総数"]
-                r1, r2, r3 = (
-                    stats.get("1着", 0),
-                    stats.get("2着", 0),
-                    stats.get("3着", 0),
-                )
-                stats["3着内"] = r1 + r2 + r3
-                if tot > 0:
-                    stats["勝率"] = round(r1 / tot, 3)
-                    stats["連対率"] = round((r1 + r2) / tot, 3)
-                    stats["複勝率"] = round((r1 + r2 + r3) / tot, 3)
-
-            # 2. 各分類別実績データ (master_analysis.json) の総数・複勝数更新
-            is_fukusho = 1 if rank in [1, 2, 3] else 0
-            for cat_k, item_val in [
-                ("脚質", s_val),
-                ("オッズ", o_val),
-                ("馬体重", w_val),
-            ]:
-                if (
-                    sec_key in master_analysis
-                    and w_seg in master_analysis[sec_key]
-                ):
-                    if cat_k in master_analysis[sec_key][w_seg]:
-                        if (
-                            item_val
-                            in master_analysis[sec_key][w_seg][cat_k]
-                        ):
-                            target = master_analysis[sec_key][w_seg][cat_k][
-                                item_val
-                            ]
-                            target["総数"] = target.get("総数", 0) + 1
-                            target["複勝"] = (
-                                target.get("複勝", 0) + is_fukusho
-                            )
-                            if target["総数"] > 0:
-                                target["率"] = round(
-                                    target["複勝"] / target["総数"], 4
-                                )
-
-        # 3. 的中マーク判定 (新1着軸判定: ◎ / ○ / △ / ×)
+        # ---------------------------------------------------------
+        # 💡 最終総合順位の上位4頭（BOX）を確実に抽出
+        # ---------------------------------------------------------
         box_horses = []
         if isinstance(today_json, dict) and r_k in today_json:
             valid_horses = [
@@ -276,62 +206,343 @@ def update_all_data_from_results(target_date, moisture_str="1.0%"):
             sorted_h = sorted(valid_horses, key=lambda x: int(float(x.get("最終順位", 99))))
             box_horses = [int(float(x["馬番"])) for x in sorted_h[:4] if "馬番" in x and pd.notna(x["馬番"])]
 
+        # ---------------------------------------------------------
+        # 💡 4頭BOX的中に基づく正確な収支計算（シート合計と完全一致）
+        # ---------------------------------------------------------
+        if box_horses and len(box_horses) == 4:
+            # 1. 単勝
+            for m_str, p_val in r_info.get("単勝", {}).items():
+                if m_str.isdigit() and int(m_str) in box_horses:
+                    day_payouts["単勝"] += p_val
+
+            # 2. 複勝
+            for item in r_info.get("複勝", []):
+                if isinstance(item, dict):
+                    m_num = item.get("馬番")
+                    if m_num and int(m_num) in box_horses:
+                        day_payouts["複勝"] += item.get("金額", 0)
+
+            # 3. 馬連
+            if t1_list and t2_list and (t1_list[0] in box_horses) and (t2_list[0] in box_horses):
+                for item in r_info.get("馬連", []):
+                    day_payouts["馬連"] += item.get("金額", 0) if isinstance(item, dict) else 0
+
+            # 4. 馬単
+            if t1_list and t2_list and (t1_list[0] in box_horses) and (t2_list[0] in box_horses):
+                for item in r_info.get("馬単", []):
+                    day_payouts["馬単"] += item.get("金額", 0) if isinstance(item, dict) else 0
+
+            # 5. ワイド (辞書型・ハイフン文字列・配列の全パターンに完全対応)
+            wide_data = r_info.get("ワイド", [])
+            if isinstance(wide_data, dict):
+                # パターンA: {"1-6": 460, "1-2": 290} のような辞書型
+                for k_str, p_val in wide_data.items():
+                    nums = [int(x) for x in re.findall(r"\d+", str(k_str))]
+                    if len(nums) == 2 and nums[0] in box_horses and nums[1] in box_horses:
+                        day_payouts["ワイド"] += p_val if isinstance(p_val, int) else p_val.get("金額", 0)
+            elif isinstance(wide_data, list):
+                # パターンB: [{"組合せ": [1, 6], "金額": 460}, ...] や [{"組合せ": "1-6", "金額": 460}]
+                for item in wide_data:
+                    if isinstance(item, dict):
+                        combo = item.get("組合せ", item.get("組", item.get("馬番", [])))
+                        nums = []
+                        if isinstance(combo, list):
+                            nums = [int(x) for x in combo if str(x).isdigit()]
+                        elif isinstance(combo, str):
+                            nums = [int(x) for x in re.findall(r"\d+", combo)]
+                        
+                        if len(nums) == 2 and nums[0] in box_horses and nums[1] in box_horses:
+                            day_payouts["ワイド"] += item.get("金額", 0)
+
+            # 6. 3連複
+            if t1_list and t2_list and t3_list:
+                if (t1_list[0] in box_horses) and (t2_list[0] in box_horses) and (t3_list[0] in box_horses):
+                    for item in r_info.get("3連複", []):
+                        day_payouts["3連複"] += item.get("金額", 0) if isinstance(item, dict) else 0
+
+            # 7. 3連単
+            if t1_list and t2_list and t3_list:
+                if (t1_list[0] in box_horses) and (t2_list[0] in box_horses) and (t3_list[0] in box_horses):
+                    for item in r_info.get("3連単", []):
+                        day_payouts["3連単"] += item.get("金額", 0) if isinstance(item, dict) else 0
+
+        # 実績加算（騎手・調教師・能力5指標・cond）
+        sec_key = "前半(1~6R)" if r <= 6 else "後半(7~12R)"
+
+        # 初回のみ日次保持用オブジェクトを初期化
+        if "daily_stats" not in locals():
+            daily_stats = {
+                "日付": clean_d, "水分区分": w_seg,
+                "jockey": {}, "trainer": {}, "abil": {},
+                "cond": {w_seg: {"脚質": {}, "オッズ": {}, "馬体重": {}}}
+            }
+
+        # 💡 タブ1と100%数値を一致させるため today_data の出走馬をベースにループ
+        r_today_list = today_json.get(r_k, []) if isinstance(today_json, dict) else []
+        r_pre_ab = pre_json.get(r_k, []) if isinstance(pre_json, dict) else []
+
+        # 馬番ごとの能力5指標マップを作成
+        ab_map_r = {}
+        if isinstance(r_pre_ab, list):
+            for hb in r_pre_ab:
+                if isinstance(hb, dict) and "馬番" in hb:
+                    try:
+                        h_no = int(float(hb["馬番"]))
+                        ab_map_r[h_no] = hb
+                    except Exception: pass
+
+        if isinstance(r_today_list, list):
+            for h_item in r_today_list:
+                if not isinstance(h_item, dict): continue
+                
+                try:
+                    h_num = int(float(h_item.get("馬番", 0)))
+                except Exception:
+                    h_num = 0
+                
+                h_name = str(h_item.get("馬名", "")).strip()
+                
+                # 確定着順判定（t1_list, t2_list, t3_list を直接参照してエラー回避）
+                rank = 4
+                if h_num in t1_list: rank = 1
+                elif h_num in t2_list: rank = 2
+                elif h_num in t3_list: rank = 3
+                is_fukusho = 1 if rank in [1, 2, 3] else 0
+
+                # 💡 『確定着順』が "-" (ハイフン) または未決定の除外馬を完全にスキップ判定
+                confirm_rank = str(h_item.get("確定着順", h_item.get("着順", ""))).strip()
+                is_cancelled = (confirm_rank == "-" or confirm_rank == "" or confirm_rank == "競走除外")
+
+                if h_name and h_num > 0 and not is_cancelled:
+                    j_name = str(h_item.get("騎手", "")).strip()
+                    t_name = str(h_item.get("調教師", "")).strip()
+                    s_val = str(h_item.get("脚質", "先行")).strip()
+                    
+                    # 💡 "-" (ハイフン/競走除外) も有効な値としてそのまま許容し、"×" へ勝手に変換させない
+                    o_val = str(h_item.get("オッズ記号", h_item.get("オッズマーク", h_item.get("オッズ印", h_item.get("オッズ", "-"))))).strip()
+                    if o_val not in ["◎", "○", "▲", "△", "×", "-"]:
+                        o_val = "-"
+                        
+                    w_val = get_weight_key(h_item.get("増減", h_item.get("馬体重増減", h_item.get("馬体重差", 0))))
+
+                    # 騎手・調教師（本日分のみカウント）
+                    for entity_type, name in [("jockey", j_name), ("trainer", t_name)]:
+                        if name:
+                            st = daily_stats[entity_type].setdefault(name, {"1着": 0, "2着": 0, "3着": 0, "4着以下": 0, "通算勝数": 0})
+                            if rank == 1: st["1着"] += 1; st["通算勝数"] += 1
+                            elif rank == 2: st["2着"] += 1
+                            elif rank == 3: st["3着"] += 1
+                            else: st["4着以下"] += 1
+
+                    # 能力5指標（事前データから参照）
+                    ab_info = ab_map_r.get(h_num, {})
+                    for ab_name in ["先行力", "障害力", "末脚力", "軽馬場", "重馬場"]:
+                        try:
+                            lv_val = str(int(float(ab_info.get(ab_name, h_item.get(ab_name, 3)))))
+                        except Exception:
+                            lv_val = "3"
+                        ab_st = daily_stats["abil"].setdefault(ab_name, {}).setdefault(lv_val, {"総数": 0, "複勝": 0})
+                        ab_st["総数"] += 1; ab_st["複勝"] += is_fukusho
+
+                    # 条件別 cond（本日分のみカウント）
+                    c_sec = daily_stats["cond"].setdefault(sec_key, {}).setdefault(w_seg, {"脚質": {}, "オッズ": {}, "馬体重": {}})
+                    s_st = c_sec["脚質"].setdefault(s_val, {"総数": 0, "複勝": 0}); s_st["総数"] += 1; s_st["複勝"] += is_fukusho
+
+                    # 💡 オッズ印が "◎", "○", "▲", "△", "×" の場合のみ加算し、"-" (取消・未設定) は集計から完全除外
+                    if o_val in ["◎", "○", "▲", "△", "×"]:
+                        o_st = c_sec["オッズ"].setdefault(o_val, {"総数": 0, "複勝": 0}); o_st["総数"] += 1; o_st["複勝"] += is_fukusho
+
+                    w_st = c_sec["馬体重"].setdefault(w_val, {"総数": 0, "複勝": 0}); w_st["総数"] += 1; w_st["複勝"] += is_fukusho
+ 
+        # 的中マーク判定
         if t1_list and box_horses:
             hit1 = any(h in box_horses for h in t1_list)
             hit2 = any(h in box_horses for h in t2_list) if t2_list else False
             hit3 = any(h in box_horses for h in t3_list) if t3_list else False
-
-            if not hit1:
-                day_winrates[r_k] = "×"
-            elif hit1 and not hit2:
-                day_winrates[r_k] = "△"
-            elif hit1 and hit2 and not hit3:
-                day_winrates[r_k] = "○"
-            elif hit1 and hit2 and hit3:
-                day_winrates[r_k] = "◎"
+            if not hit1: day_winrates[r_k] = "×"
+            elif hit1 and not hit2: day_winrates[r_k] = "△"
+            elif hit1 and hit2 and not hit3: day_winrates[r_k] = "○"
+            elif hit1 and hit2 and hit3: day_winrates[r_k] = "◎"
         else:
             day_winrates[r_k] = "-"
+            
+    # ---------------------------------------------------------
+    # 🔄 3層統合＆前回繰り越し処理（次回用に 当日_ を 0 リセット）
+    # ---------------------------------------------------------
+    # 1. 騎手・調教師の統合・繰り越し
+    for entity in ["jockey", "trainer"]:
+        for name, st in master_jt[entity].items():
+            st["前回_1着"] += st["当日_1着"]
+            st["前回_2着"] += st["当日_2着"]
+            st["前回_3着"] += st["当日_3着"]
+            st["前回_4着以下"] += st["当日_4着以下"]
+            st["前回_通算勝数"] += st["当日_通算勝数"]
+            
+            st["当日_1着"] = st["当日_2着"] = st["当日_3着"] = st["当日_4着以下"] = st["当日_通算勝数"] = 0
+            
+            r1, r2, r3, r4 = st["前回_1着"], st["前回_2着"], st["前回_3着"], st["前回_4着以下"]
+            st["1着"], st["2着"], st["3着"], st["4着以下"] = r1, r2, r3, r4
+            st["通算勝数"] = st["前回_通算勝数"]
+            tot = r1 + r2 + r3 + r4
+            fuk = r1 + r2 + r3
+            st["総数"], st["3着内"] = tot, fuk
+            st["勝率"] = round(r1 / tot, 3) if tot > 0 else 0.0
+            st["連対率"] = round((r1 + r2) / tot, 3) if tot > 0 else 0.0
+            st["複勝率"] = round(fuk / tot, 3) if tot > 0 else 0.250
 
-    # 複勝率の同期
-    for j, stats in raw_data.get("jockey", {}).items():
-        master_data.setdefault("jockey", {})[j] = (
-            stats.get("複勝率", 0.250)
-            if isinstance(stats, dict)
-            else float(stats)
+    # 2. 能力5指標 & 条件別の統合・繰り越し
+    def finalize_rates_and_carryover(node):
+        if isinstance(node, dict):
+            if "前回_総数" in node and "当日_総数" in node:
+                node["前回_総数"] += node["当日_総数"]
+                node["前回_複勝"] += node["当日_複勝"]
+                node["当日_総数"] = 0
+                node["当日_複勝"] = 0
+                
+                tot = node["前回_総数"]
+                fuk = node["前回_複勝"]
+                node["総数"] = tot
+                node["複勝"] = fuk
+                node["複勝率"] = round(fuk / tot, 4) if tot > 0 else 0.2000
+            for k, v in node.items():
+                finalize_rates_and_carryover(v)
+
+    finalize_rates_and_carryover(master_abil)
+    finalize_rates_and_carryover(master_cond)
+
+    # ---------------------------------------------------------
+    # 💡 基礎データ保護 ＆ 2度押し対応・当日上書き再構築エンジン
+    # ---------------------------------------------------------
+    # 1. 本日単体のログを data/daily/daily_stats_YYYYMMDD.json へ保存
+    DIR_DAILY = "data/daily"
+    os.makedirs(DIR_DAILY, exist_ok=True)
+    daily_file = os.path.join(DIR_DAILY, f"daily_stats_{clean_d}.json")
+    with open(daily_file, "w", encoding="utf-8") as f:
+        json.dump(daily_stats, f, ensure_ascii=False, indent=2)
+
+    # 2. マスタファイルの読み込み（10/4までのベースデータを含む）
+    master_jt = load_json(PATH_JT)
+    master_abil = load_json(PATH_ABIL)
+    master_cond = load_json(PATH_COND)
+
+    # 3. 重加算防止：すべての「当日_」項目をまず0リセット（前回_ は維持）
+    for entity in ["jockey", "trainer"]:
+        for name, st in master_jt.get(entity, {}).items():
+            st["当日_1着"] = st["当日_2着"] = st["当日_3着"] = st["当日_4着以下"] = st["当日_通算勝数"] = 0
+
+    def reset_today_only(node):
+        if isinstance(node, dict):
+            if "当日_総数" in node:
+                node["当日_総数"] = 0
+                node["当日_複勝"] = 0
+            for k, v in node.items():
+                reset_today_only(v)
+
+    reset_today_only(master_abil)
+    reset_today_only(master_cond)
+
+    # 4. data/daily/ フォルダ内の全ファイルをスキャンし、過去分は「前回_」、当日分は「当日_」へ格納
+    daily_files = sorted(glob.glob(os.path.join(DIR_DAILY, "daily_stats_*.json")))
+    for df_path in daily_files:
+        d_data = load_json(df_path)
+        f_date = os.path.basename(df_path).replace("daily_stats_", "").replace(".json", "")
+        
+        # 処理対象の日付(clean_d)と一致する場合は「当日_」、過去日付なら「前回_」へ加算
+        prefix = "当日_" if f_date == clean_d else "前回_"
+
+        # A. 騎手・調教師
+        for entity in ["jockey", "trainer"]:
+            for name, st in d_data.get(entity, {}).items():
+                if name in master_jt.get(entity, {}):
+                    m_st = master_jt[entity][name]
+                    m_st[f"{prefix}1着"] += st.get("1着", 0)
+                    m_st[f"{prefix}2着"] += st.get("2着", 0)
+                    m_st[f"{prefix}3着"] += st.get("3着", 0)
+                    m_st[f"{prefix}4着以下"] += st.get("4着以下", 0)
+                    m_st[f"{prefix}通算勝数"] += st.get("通算勝数", 0)
+
+        # B. 能力5指標
+        for ab_name, lvs in d_data.get("abil", {}).items():
+            for lv_val, st in lvs.items():
+                m_st = master_abil.setdefault(ab_name, {}).setdefault(lv_val, {"前回_総数": 0, "前回_複勝": 0, "当日_総数": 0, "当日_複勝": 0, "総数": 0, "複勝": 0, "複勝率": 0.2})
+                m_st[f"{prefix}総数"] += st.get("総数", 0)
+                m_st[f"{prefix}複勝"] += st.get("複勝", 0)
+
+        # C. 条件別
+        for sec_k, w_dict in d_data.get("cond", {}).items():
+            for w_k, cat_dict in w_dict.items():
+                for cat_k, items in cat_dict.items():
+                    for item_k, st in items.items():
+                        m_st = master_cond.setdefault(sec_k, {}).setdefault(w_k, {}).setdefault(cat_k, {}).setdefault(item_k, {"前回_総数": 0, "前回_複勝": 0, "当日_総数": 0, "当日_複勝": 0, "総数": 0, "複勝": 0, "複勝率": 0.2})
+                        m_st[f"{prefix}総数"] += st.get("総数", 0)
+                        m_st[f"{prefix}複勝"] += st.get("複勝", 0)
+
+    # 5. 最終更新日の付与
+    master_jt["最終更新日"] = clean_d
+    master_abil["最終更新日"] = clean_d
+    master_cond["最終更新日"] = clean_d
+
+    # 6. 「前回_」＋「当日_」から「総数」と「率」を算出
+    for entity in ["jockey", "trainer"]:
+        for name, st in master_jt[entity].items():
+            if isinstance(st, dict):
+                r1 = st["前回_1着"] + st["当日_1着"]
+                r2 = st["前回_2着"] + st["当日_2着"]
+                r3 = st["前回_3着"] + st["当日_3着"]
+                r4 = st["前回_4着以下"] + st["当日_4着以下"]
+                st["1着"], st["2着"], st["3着"], st["4着以下"] = r1, r2, r3, r4
+                st["通算勝数"] = st["前回_通算勝数"] + st["当日_通算勝数"]
+                tot, fuk = r1 + r2 + r3 + r4, r1 + r2 + r3
+                st["総数"], st["3着内"] = tot, fuk
+                st["勝率"] = round(r1 / tot, 3) if tot > 0 else 0.0
+                st["連対率"] = round((r1 + r2) / tot, 3) if tot > 0 else 0.0
+                st["複勝率"] = round(fuk / tot, 3) if tot > 0 else 0.250
+
+    def calc_node_rates(node):
+        if isinstance(node, dict):
+            if "前回_総数" in node and "当日_総数" in node:
+                tot = node["Previous_Total"] = node["前回_総数"] + node["当日_総数"] if False else node["前回_総数"] + node["当日_総数"]
+                fuk = node["前回_複勝"] + node["当日_複勝"]
+                node["総数"], node["複勝"] = tot, fuk
+                node["複勝率"] = round(fuk / tot, 4) if tot > 0 else 0.2000
+            for k, v in node.items():
+                if k != "最終更新日":
+                    calc_node_rates(v)
+
+    calc_node_rates(master_abil)
+    calc_node_rates(master_cond)
+
+    # 💡 人間が見やすい縦並びJSONフォーマットで保存するヘルパー関数
+    def save_json_pretty(filepath, data):
+        raw_str = json.dumps(data, ensure_ascii=False, indent=2)
+        # 最下層（1項目1行）の折り返しを横1行に整形
+        compact_str = re.sub(
+            r'\{\s*\n\s*"前回_総数":\s*(\d+),\s*\n\s*"前回_複勝":\s*(\d+),\s*\n\s*"当日_総数":\s*(\d+),\s*\n\s*"当日_複勝":\s*(\d+),\s*\n\s*"総数":\s*(\d+),\s*\n\s*"複勝":\s*(\d+),\s*\n\s*"複勝率":\s*([\d\.]+)\s*\}',
+            r'{"前回_総数": \1, "前回_複勝": \2, "当日_総数": \3, "当日_複勝": \4, "総数": \5, "複勝": \6, "複勝率": \7}',
+            raw_str
         )
-    for t, stats in raw_data.get("trainer", {}).items():
-        master_data.setdefault("trainer", {})[t] = (
-            stats.get("複勝率", 0.250)
-            if isinstance(stats, dict)
-            else float(stats)
-        )
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(compact_str)
 
-    save_json(PATH_RAW, raw_data)
-    save_json(PATH_DATA, master_data)
-    save_json(PATH_ANALYSIS, master_analysis)
+    # 1. 計算完了した3分割マスタを確実に書き出し保存
+    save_json_pretty(PATH_JT, master_jt)
+    save_json_pretty(PATH_ABIL, master_abil)
+    save_json_pretty(PATH_COND, master_cond)
 
-    # 履歴追記
+    # 2. 収支・勝率データの保存
     hist_balance = load_json(PATH_HIST_BALANCE)
-    hist_balance = [
-        row
-        for row in hist_balance
-        if str(row.get("日付")) != day_payouts["日付"]
-    ]
+    hist_balance = [row for row in hist_balance if str(row.get("日付")) != day_payouts["日付"]]
     hist_balance.insert(0, day_payouts)
-    save_json(PATH_HIST_BALANCE, hist_balance)
+    save_json_pretty(PATH_HIST_BALANCE, hist_balance)
 
     hist_winrates = load_json(PATH_HIST_WINRATES)
-    hist_winrates = [
-        row
-        for row in hist_winrates
-        if str(row.get("日付")) != day_winrates["日付"]
-    ]
+    hist_winrates = [row for row in hist_winrates if str(row.get("日付")) != day_winrates["日付"]]
     hist_winrates.insert(0, day_winrates)
-    save_json(PATH_HIST_WINRATES, hist_winrates)
+    save_json_pretty(PATH_HIST_WINRATES, hist_winrates)
 
     return (
         True,
-        f"日付『{d_label}』の全結果をマスタ全項目（10指標）・収支・的中率へ一括自動更新しました！",
+        f"日付『{d_label}』の結果を新3分割マスタ（3層繰り越し統合）へ確定反映・保存しました！",
     )
 
 
@@ -431,8 +642,6 @@ def fetch_and_parse_full_results_web(date_str, kai_code="04"):
                         current_type = "3連複"
                     elif "3連単" in row_txt or "３連単" in row_txt:
                         current_type = "3連単"
-                    elif "枠複" in row_txt or "枠連" in row_txt or "枠単" in row_txt:
-                        current_type = "枠連"  # 枠連行に入ったら即切り替え
 
                     pay_match = re.search(r"([\d,]+)\s*円", row_txt)
                     if not pay_match:
@@ -1116,11 +1325,12 @@ def show_screen3():
     with tab_ai:
         st.subheader("🤖 AIデータ分析（累積マスタ動的算出エンジン）")
 
-        cur_raw = load_json(PATH_RAW)
-        j_data = cur_raw.get("jockey", {})
-        cur_analysis = load_json(PATH_ANALYSIS)
-        ability_data = cur_analysis.get("能力5指標", {})
-
+        # 新3分割JSONから安全に取得
+        cur_jt = load_json(PATH_JT)
+        j_data = cur_jt.get("jockey", {}) if isinstance(cur_jt, dict) else {}
+        
+        ability_data = load_json(PATH_ABIL)
+        
         # --- 動的集計1：騎手複勝率 35% 以上の平均複勝率をリアルタイム算出 ---
         high_j_w3 = sum(
             [
@@ -1183,75 +1393,48 @@ def show_screen3():
     # 【ブロック2：タブ3 騎手・調教師データ（RAW全項目表示版）】
     # ---------------------------------------------------------
     with tab_master:
-        st.subheader("📄 騎手・調教師マスタデータ（最新RAWデータ）")
-        cur_raw = load_json(PATH_RAW)
-        cur_j = cur_raw.get("jockey", {})
-        cur_t = cur_raw.get("trainer", {})
+        st.subheader("📄 騎手・調教師マスタデータ（master_jt.json）")
+        cur_jt = load_json(PATH_JT)
+        cur_j = cur_jt.get("jockey", {})
+        cur_t = cur_jt.get("trainer", {})
 
         # RAWから全項目を動的取得してデータフレーム化する関数
         def build_master_df(data_dict, key_name):
             rows = []
             for k, v in data_dict.items():
                 if isinstance(v, dict):
-                    rows.append(
-                        {
-                            key_name: k,
-                            "1着": v.get("1着", 0),
-                            "2着": v.get("2着", 0),
-                            "3着": v.get("3着", 0),
-                            "4着以下": v.get("4着以下", 0),
-                            "総数": v.get("総数", 0),
-                            "3着内": v.get("3着内", 0),
-                            "勝率": f"{v.get('勝率', 0.0):.3f}",
-                            "連対率": f"{v.get('連対率', 0.0):.3f}",
-                            "複勝率": f"{v.get('複勝率', 0.0):.3f}",
-                            "通算勝数": v.get("通算勝数", 0),
-                        }
-                    )
+                    rows.append({
+                        key_name: k,
+                        "1着": v.get("1着", 0), "2着": v.get("2着", 0), "3着": v.get("3着", 0), "4着以下": v.get("4着以下", 0),
+                        "総数": v.get("総数", 0), "3着内": v.get("3着内", 0),
+                        "勝率": f"{v.get('勝率', 0.0):.3f}", "連対率": f"{v.get('連対率', 0.0):.3f}", "複勝率": f"{v.get('複勝率', 0.0):.3f}",
+                        "通算勝数": v.get("通算勝数", 0),
+                    })
             df = pd.DataFrame(rows)
-            if not df.empty:
-                df = df.sort_values(by="1着", ascending=False)
-            return df
+            return df.sort_values(by="1着", ascending=False) if not df.empty else df
 
         df_j = build_master_df(cur_j, "騎手名")
         df_t = build_master_df(cur_t, "調教師名")
 
-        # 1. 騎手データ（画面横幅いっぱい）
         st.markdown(f"### 🏇 登録騎手データ ({len(df_j)}名)")
-        if not df_j.empty:
-            st.dataframe(
-                df_j,
-                hide_index=True,
-                use_container_width=True,
-                height=350,
-            )
-        else:
-            st.info("※ 騎手データが存在しません。")
-
+        st.dataframe(df_j, hide_index=True, use_container_width=True, height=350)
         st.markdown("---")
-
-        # 2. 調教師データ（画面横幅いっぱい・下部に配置）
         st.markdown(f"### 👔 登録調教師データ ({len(df_t)}名)")
-        if not df_t.empty:
-            st.dataframe(
-                df_t,
-                hide_index=True,
-                use_container_width=True,
-                height=350,
-            )
-        else:
-            st.info("※ 調教師データが存在しません。")
+        st.dataframe(df_t, hide_index=True, use_container_width=True, height=350)
             
     # ---------------------------------------------------------
-    # 【ブロック3：タブ4 各分類別実績データ (master_analysis.json 再現版)】
+    # 【ブロック3：タブ4 各分類別実績データ (新3分割JSON対応版)】
     # ---------------------------------------------------------
     with tab_analysis:
         st.subheader("📊 各分類別実績データ（傾向分析マスタ）")
-        analysis_data = load_json(PATH_ANALYSIS)
+        
+        # 新ファイルからそれぞれ読み込み
+        master_cond = load_json(PATH_COND)
+        master_abil = load_json(PATH_ABIL)
 
-        if not analysis_data:
+        if not master_cond or not master_abil:
             st.warning(
-                "⚠️ 『master_analysis.json』 が読み込めません。ファイルの存在をご確認ください。"
+                "⚠️ マスタファイル（master_cond.json / master_abil.json）が読み込めません。"
             )
         else:
             # 1. 前半(1~6R) vs 後半(7~12R) の比較表示
@@ -1262,7 +1445,8 @@ def show_screen3():
                 html += f"<h4 style='text-align:center; color:#1565c0; margin-top:0px; margin-bottom:8px;'>{section_title}</h4>"
 
                 categories = ["脚質", "オッズ", "馬体重"]
-                water_headers = ["~0.9", "~1.5", "~2", "~3", "3.1~"]
+                # 💡 水分ヘッダーを新しい日本語表記に統一
+                water_headers = ["極重", "稍重", "普通", "稍軽", "極軽"]
 
                 for cat in categories:
                     html += f"<table class='analysis-table' style='table-layout:fixed; width:100%; margin-bottom:10px; font-size:13px;'>"
@@ -1271,22 +1455,18 @@ def show_screen3():
                         html += f"<th>{w}</th>"
                     html += "</tr></thead><tbody>"
 
-                    cat_data = section_dict.get(cat, {})
+                    # 💡 水分区分ごとのデータを集計・抽出
+                    cat_data = {}
+                    for w in water_headers:
+                        nodes = section_dict.get(w, {}).get(cat, {})
+                        for r_key, r_val in nodes.items():
+                            rate = r_val.get("複勝率", 0.0) if isinstance(r_val, dict) else float(r_val)
+                            cat_data.setdefault(r_key, {})[w] = rate
+
                     for row_key, rates in cat_data.items():
                         html += f"<tr><td class='label-col'>{row_key}</td>"
                         for w in water_headers:
-                            raw_val = rates.get(w, 0.0)
-
-                            # 辞書型 {"着内率": 0.5348, "総数": 273, "着内": 146} または数値から複勝率を取得
-                            if isinstance(raw_val, dict):
-                                rate = raw_val.get(
-                                    "複勝率", raw_val.get("着内率", 0.0)
-                                )
-                            elif isinstance(raw_val, (int, float)):
-                                rate = float(raw_val)
-                            else:
-                                rate = 0.0
-
+                            rate = rates.get(w, 0.0)
                             html += f"<td>{rate:.3f}</td>"
                         html += "</tr>"
                     html += "</tbody></table>"
@@ -1296,7 +1476,7 @@ def show_screen3():
             with col_zen:
                 st.markdown(
                     build_compact_html(
-                        "前半 (1~6R)", analysis_data.get("前半(1~6R)", {})
+                        "前半(1~6R)", master_cond.get("前半(1~6R)", {})
                     ),
                     unsafe_allow_html=True,
                 )
@@ -1304,80 +1484,61 @@ def show_screen3():
             with col_kou:
                 st.markdown(
                     build_compact_html(
-                        "後半 (7~12R)", analysis_data.get("後半(7~12R)", {})
+                        "後半(7~12R)", master_cond.get("後半(7~12R)", {})
                     ),
                     unsafe_allow_html=True,
                 )
 
             st.markdown("---")
 
-            # 2. 能力5指標 サマリー表示 (「着内」➔「複勝」へ表記変更版)
+            # 2. 能力5指標 サマリー表示
             st.markdown("### 🌟 能力5指標 評価別実績サマリー")
-            ability_data = analysis_data.get("能力5指標", {})
 
-            if ability_data:
-                abilities = ["先行力", "障害力", "末脚力", "軽馬場", "重馬場"]
+            abilities = ["先行力", "障害力", "末脚力", "軽馬場", "重馬場"]
+            html_ab = "<div style='overflow-x:auto;'><table class='analysis-table' style='table-layout:fixed; min-width:1000px; font-size:13px;'>"
 
-                html_ab = "<div style='overflow-x:auto;'><table class='analysis-table' style='table-layout:fixed; min-width:1000px; font-size:13px;'>"
+            # 最上段：タイトル行
+            html_ab += "<thead><tr class='analysis-header'>"
+            html_ab += "<th style='width:8%;' class='label-col'>項目</th>"
+            for ab in abilities:
+                html_ab += f"<th colspan='5' style='background-color:#bbdefb; color:#0d47a1; font-weight:bold;'>{ab}総数</th>"
+            html_ab += "</tr>"
 
-                # 最上段：タイトル行 (先行力総数, 障害力総数, etc.)
-                html_ab += "<thead><tr class='analysis-header'>"
-                html_ab += "<th style='width:8%;' class='label-col'>項目</th>"
-                for ab in abilities:
-                    html_ab += f"<th colspan='5' style='background-color:#bbdefb; color:#0d47a1; font-weight:bold;'>{ab}総数</th>"
-                html_ab += "</tr>"
+            # 2段目：指数値 (1 2 3 4 5)
+            html_ab += "<tr class='analysis-header'><td class='label-col'>指数値</td>"
+            for ab in abilities:
+                for lv in range(1, 6):
+                    html_ab += f"<td style='background-color:#e3f2fd;'><b>{lv}</b></td>"
+            html_ab += "</tr></thead><tbody>"
 
-                # 2段目：指数値 (1 2 3 4 5)
-                html_ab += "<tr class='analysis-header'><td class='label-col'>指数値</td>"
-                for ab in abilities:
-                    for lv in range(1, 6):
-                        html_ab += f"<td style='background-color:#e3f2fd;'><b>{lv}</b></td>"
-                html_ab += "</tr></thead><tbody>"
+            # 3段目：複勝率
+            html_ab += "<tr><td class='label-col'>複勝率</td>"
+            for ab in abilities:
+                for lv in range(1, 6):
+                    node = master_abil.get(ab, {}).get(str(lv), {})
+                    rate = float(node.get("複勝率", 0.0))
+                    html_ab += f"<td style='font-weight:bold; color:#1b5e20;'>{rate:.3f}</td>"
+            html_ab += "</tr>"
 
-                # 3段目：複勝率（小数点3位表示）
-                html_ab += "<tr><td class='label-col'>複勝率</td>"
-                for ab in abilities:
-                    for lv in range(1, 6):
-                        node = ability_data.get(ab, {}).get(str(lv), {})
-                        rate_val = node.get(
-                            "複勝率", node.get("着内率", 0.0)
-                        )
-                        rate = (
-                            float(rate_val)
-                            if isinstance(rate_val, (int, float))
-                            else 0.0
-                        )
-                        html_ab += f"<td style='font-weight:bold; color:#1b5e20;'>{rate:.3f}</td>"
-                html_ab += "</tr>"
+            # 4段目：総数
+            html_ab += "<tr><td class='label-col'>総数</td>"
+            for ab in abilities:
+                for lv in range(1, 6):
+                    tot = master_abil.get(ab, {}).get(str(lv), {}).get("総数", 0)
+                    html_ab += f"<td>{tot:,}</td>"
+            html_ab += "</tr>"
 
-                # 4段目：総数
-                html_ab += "<tr><td class='label-col'>総数</td>"
-                for ab in abilities:
-                    for lv in range(1, 6):
-                        tot = (
-                            ability_data.get(ab, {})
-                            .get(str(lv), {})
-                            .get("総数", 0)
-                        )
-                        html_ab += f"<td>{tot:,}</td>"
-                html_ab += "</tr>"
+            # 5段目：複勝
+            html_ab += "<tr><td class='label-col'>複勝</td>"
+            for ab in abilities:
+                for lv in range(1, 6):
+                    w3 = master_abil.get(ab, {}).get(str(lv), {}).get("複勝", 0)
+                    html_ab += f"<td>{w3:,}</td>"
+            html_ab += "</tr>"
 
-                # 5段目：複勝（旧：着内）
-                html_ab += "<tr><td class='label-col'>複勝</td>"
-                for ab in abilities:
-                    for lv in range(1, 6):
-                        w3 = ability_data.get(ab, {}).get(str(lv), {}).get(
-                            "複勝",
-                            ability_data.get(ab, {})
-                            .get(str(lv), {})
-                            .get("着内", 0),
-                        )
-                        html_ab += f"<td>{w3:,}</td>"
-                html_ab += "</tr>"
-
-                html_ab += "</tbody></table></div>"
-                st.markdown(html_ab, unsafe_allow_html=True)
-
+            html_ab += "</tbody></table></div>"
+            st.markdown(html_ab, unsafe_allow_html=True)
+            
     # ---------------------------------------------------------
     # 【ブロック3：タブ5 レース別勝率データ (基準値判定・縦軸同期版)】
     # ---------------------------------------------------------
@@ -1395,21 +1556,26 @@ def show_screen3():
         if total_days > 0:
             for r in range(1, 13):
                 r_key = f"{r}R"
-                tan_hits = sum(
-                    1
-                    for d in winrate_hist
-                    if d.get(r_key) in ["◎", "○", "△", "▲"]
-                )
-                ren2_hits = sum(
-                    1 for d in winrate_hist if d.get(r_key) in ["◎", "○"]
-                )
-                ren3_hits = sum(
-                    1 for d in winrate_hist if d.get(r_key) in ["◎"]
-                )
+                
+                # 💡 Excelの COUNTA (◎, ○, △, ▲, × の有効データが存在する件数) を取得
+                valid_r_data = [
+                    d.get(r_key) for d in winrate_hist 
+                    if d.get(r_key) in ["◎", "○", "△", "▲", "×"]
+                ]
+                r_counta = len(valid_r_data)
 
-                calc_rates[r]["単勝"] = round(tan_hits / total_days, 3)
-                calc_rates[r]["2連"] = round(ren2_hits / total_days, 3)
-                calc_rates[r]["3連"] = round(ren3_hits / total_days, 3)
+                if r_counta > 0:
+                    tan_hits = sum(1 for m in valid_r_data if m in ["◎", "○", "△", "▲"])
+                    ren2_hits = sum(1 for m in valid_r_data if m in ["◎", "○"])
+                    ren3_hits = sum(1 for m in valid_r_data if m in ["◎"])
+
+                    calc_rates[r]["単勝"] = round(tan_hits / r_counta, 3)
+                    calc_rates[r]["2連"] = round(ren2_hits / r_counta, 3)
+                    calc_rates[r]["3連"] = round(ren3_hits / r_counta, 3)
+                else:
+                    calc_rates[r]["単勝"] = 0.0
+                    calc_rates[r]["2連"] = 0.0
+                    calc_rates[r]["3連"] = 0.0
 
         st.markdown(
             f"#### 📈 【1R〜12R レース別累積勝率サマリー】 (累積データ数: <b>{total_days}</b> 日分)",
@@ -1492,7 +1658,6 @@ def show_screen3():
         COSTS = {
             "単勝": 4800,
             "複勝": 4800,
-            "枠連": 7200,
             "馬連": 7200,
             "馬単": 14400,
             "ワイド": 7200,
@@ -1503,7 +1668,6 @@ def show_screen3():
         T_KEYS = [
             "単勝",
             "複勝",
-            "枠連",
             "馬連",
             "馬単",
             "ワイド",

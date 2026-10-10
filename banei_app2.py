@@ -31,15 +31,15 @@ def get_today_path(date_str):
 
 def get_moisture_key(val):
     if val <= 0.9:
-        return "~0.9"
+        return "極重"
     elif val <= 1.5:
-        return "~1.5"
+        return "稍重"
     elif val <= 2.0:
-        return "~2"
+        return "普通"
     elif val <= 3.0:
-        return "~3"
+        return "稍軽"
     else:
-        return "3.1~"
+        return "極軽"
 
 
 def convert_odds_to_symbol(odds_val):
@@ -77,6 +77,15 @@ def get_weight_key(val):
             return "±1桁"
     except Exception:
         return "±1桁"
+
+def load_json(filepath):
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return [] if "history_" in filepath else {}
 
 
 # =========================================================
@@ -298,16 +307,19 @@ def show_screen2():
 
     master = {}
     try:
-        with open("master_data.json", "r", encoding="utf-8") as f:
-            master_data = json.load(f)
-        with open("master_analysis.json", "r", encoding="utf-8") as f:
-            master_analysis = json.load(f)
+        with open("master_jt.json", "r", encoding="utf-8") as f:
+            master_jt = json.load(f)
+        with open("master_abil.json", "r", encoding="utf-8") as f:
+            master_abil = json.load(f)
+        with open("master_cond.json", "r", encoding="utf-8") as f:
+            master_cond = json.load(f)
 
-        # master 変数に master_analysis.json をベースとし、jockey/trainer を統合
-        master = master_analysis.copy() if isinstance(master_analysis, dict) else {}
-        if isinstance(master_data, dict):
-            master["jockey"] = master_data.get("jockey", {})
-            master["trainer"] = master_data.get("trainer", {})
+        # アプリ内参照用辞書（master）へ統合
+        master = master_cond.copy() if isinstance(master_cond, dict) else {}
+        master["能力5指標"] = master_abil if isinstance(master_abil, dict) else {}
+        if isinstance(master_jt, dict):
+            master["jockey"] = master_jt.get("jockey", {})
+            master["trainer"] = master_jt.get("trainer", {})
     except Exception as e:
         st.error(f"マスタファイルの読み込みエラー: {e}")
         return
@@ -431,12 +443,88 @@ def show_screen2():
 
             df_pre = pd.DataFrame(race_pre_list)
 
+            # ---------------------------------------------------------
+            # 💡 保存済みデータ・確定結果の完全復元
+            # ---------------------------------------------------------
             saved_r_data = today_data_loaded.get(r_key, [])
             saved_map = {
                 int(item["馬番"]): item for item in saved_r_data
             } if saved_r_data else {}
 
+            # 保存済みデータの確定着順をセッションへ読み込み
+            if "today_race_results" not in st.session_state:
+                st.session_state.today_race_results = {}
+            if r_idx not in st.session_state.today_race_results and saved_map:
+                saved_res = {}
+                for h_num, item in saved_map.items():
+                    if "確定着順" in item and item["確定着順"] != "-":
+                        saved_res[h_num] = item["確定着順"] if "確定着順" in item else item.get("確定着順", "-")
+                if saved_res:
+                    st.session_state.today_race_results[r_idx] = saved_res
+
             live_dict = st.session_state.today_live_data.get(r_idx, {})
+
+            # ---------------------------------------------------------
+            # 💡 レース別勝率データ（r_k, winrate_hist を定義して COUNTA で計算）
+            # ---------------------------------------------------------
+            r_k = f"{r_idx}R"
+            winrate_hist = (
+                load_json("history_winrates.json")
+                if os.path.exists("history_winrates.json")
+                else []
+            )
+
+            tan_rate, ren2_rate, ren3_rate = 0.0, 0.0, 0.0
+            valid_r_data = [
+                d.get(r_k) for d in winrate_hist 
+                if isinstance(d, dict) and d.get(r_k) in ["◎", "○", "▲", "△", "×"]
+            ]
+            r_counta = len(valid_r_data)
+
+            if r_counta > 0:
+                tan_hits = sum(1 for m in valid_r_data if m in ["◎", "○", "▲", "△"])
+                ren2_hits = sum(1 for m in valid_r_data if m in ["◎", "○"])
+                ren3_hits = sum(1 for m in valid_r_data if m in ["◎"])
+
+                tan_rate = tan_hits / r_counta
+                ren2_rate = ren2_hits / r_counta
+                ren3_rate = ren3_hits / r_counta
+
+            # 基準値超えのハイライト表示（単勝:0.75, 2連:0.50, 3連:0.25）
+            c_tan = "color:#e65100; font-weight:bold; background-color:#fff9c4; padding:2px 4px; border-radius:3px;" if tan_rate >= 0.75 else ""
+            c_ren2 = "color:#e65100; font-weight:bold; background-color:#fff9c4; padding:2px 4px; border-radius:3px;" if ren2_rate >= 0.50 else ""
+            c_ren3 = "color:#e65100; font-weight:bold; background-color:#fff9c4; padding:2px 4px; border-radius:3px;" if ren3_rate >= 0.25 else ""
+
+            st.markdown(
+                f"""
+                <div style="background-color: #f5f5f5; border: 1px solid #e0e0e0; padding: 4px 10px; border-radius: 5px; margin-bottom: 8px; font-size: 13px;">
+                    📊 <b>{r_idx}R 累積過去勝率:</b>&nbsp;&nbsp;
+                    単勝勝率: <span style="{c_tan}">{tan_rate:.3f}</span> (基準:0.750) &nbsp;|&nbsp;
+                    ２連勝率: <span style="{c_ren2}">{ren2_rate:.3f}</span> (基準:0.500) &nbsp;|&nbsp;
+                    ３連勝率: <span style="{c_ren3}">{ren3_rate:.3f}</span> (基準:0.250)
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            # =========================================================
+            # [app2-merge-live] 当日データマージ（保存値の完全復元対応）
+            # =========================================================
+            saved_r_data = today_data_loaded.get(r_key, [])
+            saved_map = {
+                int(item["馬番"]): item for item in saved_r_data
+            } if saved_r_data else {}
+
+            # 保存データから確定着順も自動ロード
+            if "today_race_results" not in st.session_state:
+                st.session_state.today_race_results = {}
+            if r_idx not in st.session_state.today_race_results and saved_map:
+                saved_res = {}
+                for h_num, item in saved_map.items():
+                    if "確定着順" in item and item["確定着順"] != "-":
+                        saved_res[h_num] = item["確定着順"]
+                if saved_res:
+                    st.session_state.today_race_results[r_idx] = saved_res
 
             def merge_live_info(row):
                 h_num = int(row["馬番"])
@@ -458,14 +546,17 @@ def show_screen2():
                         ]
                     )
                 elif saved_item:
-                    o_sym = saved_item.get("オッズ記号", "")
+                    o_val = float(saved_item.get("オッズ数値", 999.0))
+                    # 💡 "-" (ハイフン) もオッズ記号として正しく読み出し
+                    o_sym = str(saved_item.get("オッズ記号", saved_item.get("オッズマーク", "-"))).strip()
+                    if not o_sym: o_sym = "-"
                     pop_r = str(saved_item.get("人気", "-"))
                     w_diff = str(saved_item.get("増減", "0"))
                     j_name = saved_item.get("騎手", row.get("騎手", ""))
                     t_name = saved_item.get("調教師", row.get("調教師", ""))
                     return pd.Series(
                         [
-                            999.0,
+                            o_val,
                             o_sym,
                             pop_r,
                             w_diff,
@@ -508,6 +599,7 @@ def show_screen2():
                             date_str, r_idx
                         )
                         st.session_state.today_live_data[r_idx] = fetched_live
+                        st.session_state["active_race_tab"] = r_idx  # 👈 現在のタブ位置を保存
                         st.success(f"{r_idx}R の最新データを更新しました！")
                         st.rerun()
 
@@ -523,6 +615,7 @@ def show_screen2():
                         if "today_race_results" not in st.session_state:
                             st.session_state.today_race_results = {}
                         st.session_state.today_race_results[r_idx] = res_dict
+                        st.session_state["active_race_tab"] = r_idx  # 👈 現在のタブ位置を保存
                         st.success(f"{r_idx}R の確定結果を取得しました！")
                         st.rerun()
 
@@ -608,11 +701,6 @@ def show_screen2():
             with col_input:
                 st.markdown("**購入検討 / パドック**")
 
-                saved_r_data = today_data_loaded.get(r_key, [])
-                saved_map = {
-                    int(item["馬番"]): item for item in saved_r_data
-                } if saved_r_data else {}
-
                 init_buys = [
                     saved_map.get(h, {}).get("検討", "-") for h in range(1, 11)
                 ]
@@ -688,16 +776,17 @@ def show_screen2():
                 # 1. オッズ指数の安全取得 (列名表記揺れ: オッズマーク/オッズ記号/オッズ印 に全対応)
                 # ---------------------------------------------------------
                 odds_sym = str(
-                    row.get("オッズマーク", row.get("オッズ記号", row.get("オッズ印", "×")))
+                    row.get("オッズマーク", row.get("オッズ記号", row.get("オッズ印", "-")))
                 ).strip()
                 
                 raw_p_odds = 0.35
                 try:
+                    # 💡 [前半/後半] ➔ [水分] ➔ [オッズ] ➔ [印] の正確な順序で参照
                     odds_node = (
                         master.get(half_key, {})
+                        .get(moisture_key, {})
                         .get("オッズ", {})
                         .get(odds_sym, {})
-                        .get(moisture_key, {})
                     )
                     if isinstance(odds_node, dict):
                         raw_p_odds = float(odds_node.get("複勝率", odds_node.get("率", 0.35)))
@@ -716,11 +805,13 @@ def show_screen2():
                 
                 raw_p_weight = 0.25
                 try:
+                    # 💡 [前半/後半] ➔ [水分] ➔ [馬体重] ➔ [増減キー] の正確な順序で参照
+                    w_val = get_weight_key(row.get("増減", row.get("馬体重増減", 0)))
                     weight_node = (
                         master.get(half_key, {})
-                        .get("馬体重", {})
-                        .get(w_key, {})
                         .get(moisture_key, {})
+                        .get("馬体重", {})
+                        .get(w_val, {})
                     )
                     if isinstance(weight_node, dict):
                         raw_p_weight = float(weight_node.get("複勝率", weight_node.get("率", 0.25)))
@@ -884,6 +975,21 @@ def show_screen2():
                 html_code += "</tbody></table>"
                 st.markdown(html_code, unsafe_allow_html=True)
 
+            # 💡 変数名を today_data_loaded に統一して修正
+            if isinstance(today_data_loaded, dict):
+                for r_k, h_list in today_data_loaded.items():
+                    if isinstance(h_list, list):
+                        for h in h_list:
+                            if isinstance(h, dict):
+                                c_rank = str(h.get("確定着順", h.get("着順", ""))).strip()
+                                if c_rank in ["-", "取消", "除外", "競走除外"] or h.get("is_cancel"):
+                                    h["確定着順"] = "競走除外"
+                                    h["オッズマーク"] = "-"
+                                    h["オッズ記号"] = "-"
+                                    h["オッズ印"] = "-"
+                                    h["人気"] = "-"
+                                    h["パドック"] = "-"
+
             if save_trigger:
                 today_save_filename = get_today_path(date_str)
                 today_store = {}
@@ -894,31 +1000,16 @@ def show_screen2():
                     except Exception:
                         today_store = {}
 
-                # 保存対象カラムに "確定着順" を追加
-                save_cols = [
-                    "馬番",
-                    "馬名",
-                    "検討",
-                    "パドック値",
-                    "最終順位",
-                    "最終総合評価",
-                    "事前順位",
-                    "事前総合評価",
-                    "オッズ記号",
-                    "人気",
-                    "増減",
-                    "脚質",
-                    "騎手",
-                    "調教師",
-                    "確定着順",  # 👈 ここを追加！
-                ]
-                existing_save_cols = [
-                    c for c in save_cols if c in df_final.columns
-                ]
+                # 💡 競走除外・取消馬はオッズ記号や人気を "-" に確定変換して保存データを作成
+                records = df_final.to_dict(orient="records")
+                for rec in records:
+                    c_rank = str(rec.get("確定着順", "-")).strip()
+                    if c_rank in ["-", "取消", "除外", "競走除外"] or rec.get("取消", False):
+                        rec["オッズ記号"] = "-"
+                        rec["オッズマーク"] = "-"
+                        rec["人気"] = "-"
 
-                today_store[r_key] = df_final[existing_save_cols].to_dict(
-                    orient="records"
-                )
+                today_store[r_key] = records
 
                 with open(today_save_filename, "w", encoding="utf-8") as f:
                     json.dump(today_store, f, ensure_ascii=False, indent=2)
