@@ -29,17 +29,19 @@ def get_today_path(date_str):
     return os.path.join(DIR_TODAY, f"today_data_{date_str}.json")
 
 
+# =========================================================
+# 水分量からマスタ参照キーを取得する関数（2段階統合版）
+# =========================================================
 def get_moisture_key(val):
-    if val <= 0.9:
-        return "極重"
-    elif val <= 1.5:
-        return "稍重"
-    elif val <= 2.0:
-        return "普通"
-    elif val <= 3.0:
-        return "稍軽"
+    try:
+        f_val = float(val)
+    except (ValueError, TypeError):
+        f_val = 1.0
+
+    if f_val <= 1.5:
+        return "重馬場"
     else:
-        return "極軽"
+        return "軽馬場"
 
 
 def convert_odds_to_symbol(odds_val):

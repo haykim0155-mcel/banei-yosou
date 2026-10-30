@@ -20,19 +20,18 @@ def get_pre_path(date_str):
     return os.path.join(DIR_PRE, f"pre_data_{clean_d}.json")
 
 # =========================================================
-# 水分量からマスタ参照キーを取得する関数
+# 水分量からマスタ参照キーを取得する関数（2段階統合版）
 # =========================================================
 def get_moisture_key(val):
-    if val <= 0.9:
-        return "極重"
-    elif val <= 1.5:
-        return "稍重"
-    elif val <= 2.0:
-        return "普通"
-    elif val <= 3.0:
-        return "稍軽"
+    try:
+        f_val = float(val)
+    except (ValueError, TypeError):
+        f_val = 1.0
+
+    if f_val <= 1.5:
+        return "重馬場"
     else:
-        return "極軽"
+        return "軽馬場"
 
 # =========================================================
 # 💡 騎手・調教師の表記ゆれ（5文字名・ケ/ヶ・空白等）を完全抽出するマスタ参照関数

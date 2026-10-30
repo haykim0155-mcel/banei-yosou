@@ -51,7 +51,7 @@ def get_result_path(date_str):
     return os.path.join(DIR_RESULT, f"result_data_{date_str}.json")
 
 # =========================================================
-# 水分量からマスタ参照キーを取得する関数（新日本語表記統一）
+# 水分量からマスタ参照キーを取得する関数（2段階統合版）
 # =========================================================
 def get_moisture_key(val):
     try:
@@ -59,16 +59,10 @@ def get_moisture_key(val):
     except (ValueError, TypeError):
         f_val = 1.0
 
-    if f_val <= 0.9:
-        return "極重"
-    elif f_val <= 1.5:
-        return "稍重"
-    elif f_val <= 2.0:
-        return "普通"
-    elif f_val <= 3.0:
-        return "稍軽"
+    if f_val <= 1.5:
+        return "重馬場"
     else:
-        return "極軽"
+        return "軽馬場"
 
 
 # =========================================================
@@ -196,7 +190,7 @@ def update_all_data_from_results(target_date, moisture_str="1.0%"):
         m_val = float(re.sub(r"[^\d.]", "", moisture_str))
         w_seg = get_moisture_key(m_val)
     except Exception:
-        w_seg = "稍重"
+        w_seg = "重馬場"
 
     for r in range(1, 13):
         r_k = f"{r}R"
@@ -1432,28 +1426,35 @@ def show_screen3():
                 html += f"<h4 style='text-align:center; color:#1565c0; margin-top:0px; margin-bottom:8px;'>{section_title}</h4>"
 
                 categories = ["脚質", "オッズ", "馬体重"]
-                # 💡 水分ヘッダーを新しい日本語表記に統一
-                water_headers = ["極重", "稍重", "普通", "稍軽", "極軽"]
+                # 💡 水分ヘッダーを2段階（重馬場・軽馬場）に統合
+                water_headers = [("重馬場", ["重馬場", "~1.5", "重"]), ("軽馬場", ["軽馬場", "1.6~", "軽"])]
 
                 for cat in categories:
                     html += f"<table class='analysis-table' style='table-layout:fixed; width:100%; margin-bottom:10px; font-size:13px;'>"
-                    html += f"<thead><tr class='analysis-header'><th style='width:25%;'>{cat}</th>"
-                    for w in water_headers:
-                        html += f"<th>{w}</th>"
+                    html += f"<thead><tr class='analysis-header'><th style='width:34%;'>{cat}</th>"
+                    for disp_w, _ in water_headers:
+                        sub_label = " (〜1.5%)" if disp_w == "重馬場" else " (1.6%〜)"
+                        html += f"<th style='width:33%;'>{disp_w}<span style='font-size:11px;'>{sub_label}</span></th>"
                     html += "</tr></thead><tbody>"
 
                     # 💡 水分区分ごとのデータを集計・抽出
                     cat_data = {}
-                    for w in water_headers:
-                        nodes = section_dict.get(w, {}).get(cat, {})
+                    for disp_w, match_keys in water_headers:
+                        # キーの表記揺れ（重馬場 or ~1.5）を吸収
+                        nodes = {}
+                        for mk in match_keys:
+                            if mk in section_dict and cat in section_dict[mk]:
+                                nodes = section_dict[mk][cat]
+                                break
+
                         for r_key, r_val in nodes.items():
                             rate = r_val.get("複勝率", 0.0) if isinstance(r_val, dict) else float(r_val)
-                            cat_data.setdefault(r_key, {})[w] = rate
+                            cat_data.setdefault(r_key, {})[disp_w] = rate
 
                     for row_key, rates in cat_data.items():
                         html += f"<tr><td class='label-col'>{row_key}</td>"
-                        for w in water_headers:
-                            rate = rates.get(w, 0.0)
+                        for disp_w, _ in water_headers:
+                            rate = rates.get(disp_w, 0.0)
                             html += f"<td>{rate:.3f}</td>"
                         html += "</tr>"
                     html += "</tbody></table>"
