@@ -279,7 +279,10 @@ def update_all_data_from_results(target_date, moisture_str="1.0%"):
             daily_stats = {
                 "日付": clean_d, "水分区分": w_seg,
                 "jockey": {}, "trainer": {}, "abil": {},
-                "cond": {w_seg: {"脚質": {}, "オッズ": {}, "馬体重": {}}}
+                "cond": {
+                    "前半(1~6R)": {w_seg: {"脚質": {}, "オッズ": {}, "馬体重": {}}},
+                    "後半(7~12R)": {w_seg: {"脚質": {}, "オッズ": {}, "馬体重": {}}}
+                }
             }
 
         # 💡 タブ1と100%数値を一致させるため today_data の出走馬をベースにループ
@@ -377,28 +380,54 @@ def update_all_data_from_results(target_date, moisture_str="1.0%"):
     # ---------------------------------------------------------
     # 💡 2度押し対応・重複加算完全防止エンジン
     # ---------------------------------------------------------
-    # 1. 本日単体の集計ログを data/daily/daily_stats_YYYYMMDD.json へ保存
-    DIR_DAILY = "data/daily"
-    os.makedirs(DIR_DAILY, exist_ok=True)
-    daily_file = os.path.join(DIR_DAILY, f"daily_stats_{clean_d}.json")
-    with open(daily_file, "w", encoding="utf-8") as f:
-        json.dump(daily_stats, f, ensure_ascii=False, indent=2)
+    # ---------------------------------------------------------
+    # 💡 日付判定 ＆ 過去実績繰り越し ＆ 重複加算（2度押し）防止エンジン
+    # ---------------------------------------------------------
+    last_updated_date = str(master_cond.get("最終更新日", "")).strip()
+    is_new_day = (last_updated_date != "" and last_updated_date != clean_d)
 
-    # 2. 重複加算防止：すべてのマスタ項目の「当日_」を0リセットする
-    for entity in ["jockey", "trainer"]:
-        for name, st in master_jt.get(entity, {}).items():
-            st["当日_1着"] = st["当日_2着"] = st["当日_3着"] = st["当日_4着以下"] = st["当日_通算勝数"] = 0
+    if is_new_day:
+        # A. 新しい日付に進んだ場合：これまでの「総数」を「前回_総数」へ自動繰り越し
+        for entity in ["jockey", "trainer"]:
+            for name, st in master_jt.get(entity, {}).items():
+                if isinstance(st, dict) and "総数" in st:
+                    st["前回_1着"] = st.get("1着", 0)
+                    st["前回_2着"] = st.get("2着", 0)
+                    st["前回_3着"] = st.get("3着", 0)
+                    st["前回_4着以下"] = st.get("4着以下", 0)
+                    st["前回_通算勝数"] = st.get("通算勝数", 0)
+                    st["当日_1着"] = st["当日_2着"] = st["当日_3着"] = st["当日_4着以下"] = st["当日_通算勝数"] = 0
 
-    def reset_today_only(node):
-        if isinstance(node, dict):
-            if "当日_総数" in node:
-                node["当日_総数"] = 0
-                node["当日_複勝"] = 0
-            for k, v in node.items():
-                reset_today_only(v)
+        def rollover_to_previous(node):
+            if isinstance(node, dict):
+                if "総数" in node and "複勝" in node:
+                    node["前回_総数"] = node.get("総数", 0)
+                    node["前回_複勝"] = node.get("複勝", 0)
+                    node["当日_総数"] = 0
+                    node["当日_複勝"] = 0
+                for k, v in node.items():
+                    if k != "最終更新日":
+                        rollover_to_previous(v)
 
-    reset_today_only(master_abil)
-    reset_today_only(master_cond)
+        rollover_to_previous(master_abil)
+        rollover_to_previous(master_cond)
+    else:
+        # B. 同一日付での2度押し・再実行の場合：当日分のみ0リセットして二重加算を完全防止
+        for entity in ["jockey", "trainer"]:
+            for name, st in master_jt.get(entity, {}).items():
+                st["当日_1着"] = st["当日_2着"] = st["当日_3着"] = st["当日_4着以下"] = st["当日_通算勝数"] = 0
+
+        def reset_today_only(node):
+            if isinstance(node, dict):
+                if "当日_総数" in node:
+                    node["当日_総数"] = 0
+                    node["当日_複勝"] = 0
+                for k, v in node.items():
+                    if k != "最終更新日":
+                        reset_today_only(v)
+
+        reset_today_only(master_abil)
+        reset_today_only(master_cond)
 
     # 3. 本日分（daily_stats）の数値だけを「当日_」へ確実に1回分適用する
     # A. 騎手・調教師
@@ -1453,9 +1482,19 @@ def show_screen3():
 
                     for row_key, rates in cat_data.items():
                         html += f"<tr><td class='label-col'>{row_key}</td>"
-                        for disp_w, _ in water_headers:
-                            rate = rates.get(disp_w, 0.0)
-                            html += f"<td>{rate:.3f}</td>"
+                        for disp_w, match_keys in water_headers:
+                            # 該当ノードから率・当日・総数を抽出
+                            node = {}
+                            for mk in match_keys:
+                                if mk in section_dict and cat in section_dict[mk]:
+                                    node = section_dict[mk][cat].get(row_key, {})
+                                    if node: break
+                            rate = node.get("複勝率", 0.0)
+                            tot = node.get("総数", 0)
+                            tdy = node.get("当日_総数", 0)
+                            # 当日加算がある場合は青色で強調表示
+                            tdy_disp = f" <span style='color:#1565c0; font-size:11px;'>(+{tdy})</span>" if tdy > 0 else ""
+                            html += f"<td><b>{rate:.3f}</b>{tdy_disp}<br><span style='color:#757575; font-size:10px;'>計{tot}</span></td>"
                         html += "</tr>"
                     html += "</tbody></table>"
                 html += "</div>"
