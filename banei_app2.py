@@ -422,7 +422,6 @@ def show_screen2():
         st.session_state.today_live_data = {r: {} for r in range(1, 13)}
 
     SELECT_PADDOCK_OPTIONS = [0.2, 0.1, 0.0, -0.1, -0.2]
-    SELECT_BUY_MARKS = ["-", "◎", "○", "▲", "△", "×"]
 
     # 💡 選択レース番号のセッション保持（初期値: 1R）
     if "active_race_tab" not in st.session_state:
@@ -718,14 +717,13 @@ def show_screen2():
         col_input, col_table = st.columns([0.9, 4.1])
 
         # =========================================================
-        # [app2-paddock-editor] パドック評価 ＆ 購入検討印入力
+        # [app2-paddock-editor] パドック評価入力
         # =========================================================
-        with col_input:
-            st.markdown("**購入検討 / パドック**")
+        col_input, col_table = st.columns([0.8, 4.2])
 
-            init_buys = [
-                saved_map.get(h, {}).get("検討", "-") for h in range(1, 11)
-            ]
+        with col_input:
+            st.markdown("**パドック評価**")
+
             init_paddocks = [
                 float(saved_map.get(h, {}).get("パドック値", 0.0))
                 for h in range(1, 11)
@@ -733,7 +731,6 @@ def show_screen2():
 
             paddock_df = pd.DataFrame(
                 {
-                    "検討": init_buys,
                     "馬番": range(1, 11),
                     "パドック": init_paddocks,
                 }
@@ -741,12 +738,6 @@ def show_screen2():
             edited_paddock = st.data_editor(
                 paddock_df,
                 column_config={
-                    "検討": st.column_config.SelectboxColumn(
-                        "検討",
-                        options=SELECT_BUY_MARKS,
-                        width="extra-small",
-                        required=True,
-                    ),
                     "馬番": st.column_config.NumberColumn(
                         "馬番", width="extra-small"
                     ),
@@ -907,7 +898,6 @@ def show_screen2():
             <table class="custom-table">
                 <thead>
                     <tr>
-                        <th style="width:22px;">検討</th>
                         <th style="width:22px;">馬番</th>
                         <th style="width:90px;">馬名</th>
                         <th class="red-header" style="width:28px;">最終<br>順位</th>
@@ -943,7 +933,6 @@ def show_screen2():
                 if row["空欄馬"]:
                     status_str = "取消" if row.get("取消", False) else ""
                     html_code += "<tr class='cancel-row'>"
-                    html_code += f"<td class='text-center'>{row.get('検討','-')}</td>"
                     html_code += f"<td class='text-center'>{row['馬番']}</td>"
                     html_code += f"<td class='text-left'>{row['馬名']} {status_str}</td>"
                     html_code += "<td class='text-center'>-</td><td class='text-center'>-</td><td class='text-center'>-</td><td class='text-center'>-</td>"
@@ -972,7 +961,6 @@ def show_screen2():
                     )
 
                     html_code += f"<tr class='{row_class}'>"
-                    html_code += f"<td class='text-center' style='font-weight:bold; color:#d81b60;'>{row['検討']}</td>"
                     html_code += f"<td class='text-center'>{row['馬番']}</td>"
                     html_code += f"<td class='text-left' style='font-size:12px; white-space:nowrap;'>{row['馬名']}</td>"
 
